@@ -13,7 +13,7 @@
 #include <string>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <visualization_msgs/InteractiveMarker.h>
-#include <xmlrpcpp/XmlRpc.h>
+#include <XmlRpc.h>
 
 void testFeedback(
 		const visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback)
