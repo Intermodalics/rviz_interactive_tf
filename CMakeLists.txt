@@ -5,11 +5,11 @@ find_package(catkin REQUIRED COMPONENTS
   interactive_markers
   roscpp
   visualization_msgs
-  tf
+  tf2_ros
 )
 
 catkin_package(
-  CATKIN_DEPENDS interactive_markers roscpp visualization_msgs tf
+  CATKIN_DEPENDS interactive_markers roscpp visualization_msgs tf2_ros
 )
 
 include_directories(include ${catkin_INCLUDE_DIRS})

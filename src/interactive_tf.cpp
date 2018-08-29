@@ -6,12 +6,14 @@
  */
 
 #include <boost/bind.hpp>
-#include <geometry_msgs/Pose.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
 #include <interactive_markers/interactive_marker_server.h>
 #include <ros/ros.h>
 #include <string>
-#include <tf/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <visualization_msgs/InteractiveMarker.h>
+#include <xmlrpcpp/XmlRpc.h>
 
 void testFeedback(
 		const visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback)
@@ -24,12 +26,10 @@ class InteractiveTf
   void processFeedback(unsigned ind, const visualization_msgs::InteractiveMarkerFeedbackConstPtr &feedback);
   visualization_msgs::InteractiveMarker int_marker_;
 
-  geometry_msgs::Pose pose_;
-  tf::TransformBroadcaster br_;
-  std::string parent_frame_;
-  std::string frame_;
-  void updateTf(int, const ros::TimerEvent& event);
-  ros::Timer tf_timer_;
+  geometry_msgs::TransformStamped transform_;
+  tf2_ros::StaticTransformBroadcaster br_;
+  bool lock_rotate_xy_;
+  void updateTf(int);
 
 public:
   InteractiveTf();
@@ -37,22 +37,52 @@ public:
 };
 
 InteractiveTf::InteractiveTf() :
-  parent_frame_("map"),
-  frame_("interactive_tf")
+  lock_rotate_xy_(false)
 {
   server_.reset(new interactive_markers::InteractiveMarkerServer("interactive_tf"));
-  pose_.orientation.w = 1.0;
+  transform_.header.frame_id = "map";
+  transform_.child_frame_id = "interactive_tf";
+  transform_.transform.rotation.w = 1.0;
 
-  ros::param::get("~parent_frame", parent_frame_);
-  ros::param::get("~frame", frame_);
+  ros::param::get("~parent_frame", transform_.header.frame_id);
+  if (ros::param::has("~header/frame_id")) {
+    ros::param::get("~header/frame_id", transform_.header.frame_id);
+  }
+  ros::param::get("~frame", transform_.child_frame_id);
+  if (ros::param::has("~child_frame_id")) {
+    ros::param::get("~child_frame_id", transform_.child_frame_id);
+  }
+  ros::param::get("~lock_rotate_xy", lock_rotate_xy_);
 
-  int_marker_.header.frame_id = parent_frame_;
+  // load initial pose from parameter server
+  XmlRpc::XmlRpcValue initial_transform;
+  if (ros::param::get("~transform", initial_transform)) {
+    try {
+      transform_.transform.translation.x = initial_transform["translation"]["x"];
+      transform_.transform.translation.y = initial_transform["translation"]["y"];
+      transform_.transform.translation.z = initial_transform["translation"]["z"];
+      transform_.transform.rotation.w = initial_transform["rotation"]["w"];
+      transform_.transform.rotation.x = initial_transform["rotation"]["x"];
+      transform_.transform.rotation.y = initial_transform["rotation"]["y"];
+      transform_.transform.rotation.z = initial_transform["rotation"]["z"];
+    } catch(XmlRpc::XmlRpcException &e) {
+      ROS_ERROR("Invalid transform parameter: %s", e.getMessage().c_str());
+    }
+  }
+
+  int_marker_.header.frame_id = transform_.header.frame_id;
   // http://answers.ros.org/question/262866/interactive-marker-attached-to-a-moving-frame/
   // putting a timestamp on the marker makes it not appear
   // int_marker_.header.stamp = ros::Time::now();
 	int_marker_.name = "interactive_tf";
 	int_marker_.description = "control a tf with 6dof";
-  int_marker_.pose = pose_;
+  int_marker_.pose.position.x = transform_.transform.translation.x;
+  int_marker_.pose.position.y = transform_.transform.translation.y;
+  int_marker_.pose.position.z = transform_.transform.translation.z + 0.01;
+  int_marker_.pose.orientation.w = transform_.transform.rotation.w;
+  int_marker_.pose.orientation.x = transform_.transform.rotation.x;
+  int_marker_.pose.orientation.y = transform_.transform.rotation.y;
+  int_marker_.pose.orientation.z = transform_.transform.rotation.z;
 
   {
   visualization_msgs::InteractiveMarkerControl control;
@@ -61,9 +91,11 @@ InteractiveTf::InteractiveTf() :
 	control.orientation.x = 1;
 	control.orientation.y = 0;
 	control.orientation.z = 0;
-	control.name = "rotate_x";
-	control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
-	int_marker_.controls.push_back(control);
+  if (!lock_rotate_xy_) {
+    control.name = "rotate_x";
+    control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
+    int_marker_.controls.push_back(control);
+  }
 	control.name = "move_x";
 	control.interaction_mode = visualization_msgs::InteractiveMarkerControl::MOVE_AXIS;
 	int_marker_.controls.push_back(control);
@@ -83,9 +115,11 @@ InteractiveTf::InteractiveTf() :
 	control.orientation.x = 0;
 	control.orientation.y = 0;
 	control.orientation.z = 1;
-	control.name = "rotate_y";
-	control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
-	int_marker_.controls.push_back(control);
+  if (!lock_rotate_xy_) {
+    control.name = "rotate_y";
+    control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
+    int_marker_.controls.push_back(control);
+  }
 	control.name = "move_y";
 	control.interaction_mode = visualization_msgs::InteractiveMarkerControl::MOVE_AXIS;
 	int_marker_.controls.push_back(control);
@@ -99,8 +133,7 @@ InteractiveTf::InteractiveTf() :
 
   server_->applyChanges();
 
-  tf_timer_ = nh_.createTimer(ros::Duration(0.05),
-      boost::bind(&InteractiveTf::updateTf, this, 0, _1));
+  updateTf(0);
 }
 
 InteractiveTf::~InteractiveTf()
@@ -108,16 +141,10 @@ InteractiveTf::~InteractiveTf()
   server_.reset();
 }
 
-void InteractiveTf::updateTf(int, const ros::TimerEvent& event)
+void InteractiveTf::updateTf(int)
 {
-  tf::Transform transform;
-  transform.setOrigin(tf::Vector3(pose_.position.x, pose_.position.y, pose_.position.z));
-  transform.setRotation(tf::Quaternion(pose_.orientation.x,
-      pose_.orientation.y,
-      pose_.orientation.z,
-      pose_.orientation.w));
-  br_.sendTransform(tf::StampedTransform(transform, ros::Time::now(),
-      parent_frame_, frame_));
+  transform_.header.stamp = ros::Time::now();
+  br_.sendTransform(transform_);
 }
 
 void InteractiveTf::processFeedback(
@@ -125,10 +152,19 @@ void InteractiveTf::processFeedback(
 		const visualization_msgs::InteractiveMarkerFeedbackConstPtr& feedback)
 {
   ROS_INFO_STREAM(feedback->header.frame_id);
-  pose_ = feedback->pose;
+  transform_.transform.translation.x = feedback->pose.position.x;
+  transform_.transform.translation.y = feedback->pose.position.y;
+  transform_.transform.translation.z = feedback->pose.position.z - 0.01;
+  transform_.transform.rotation.w = feedback->pose.orientation.w;
+  transform_.transform.rotation.x = feedback->pose.orientation.x;
+  transform_.transform.rotation.y = feedback->pose.orientation.y;
+  transform_.transform.rotation.z = feedback->pose.orientation.z;
   ROS_DEBUG_STREAM(feedback->control_name);
   ROS_DEBUG_STREAM(feedback->event_type);
   ROS_DEBUG_STREAM(feedback->mouse_point);
+
+  updateTf(0);
+
 	// TODO(lucasw) all the pose changes get handled by the server elsewhere?
 	server_->applyChanges();
 }
